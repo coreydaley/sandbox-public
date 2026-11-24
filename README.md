@@ -9,6 +9,7 @@ Examples are grouped by what they plug into.
 
 | Example | What it does |
 |---|---|
+| [`hugo/indexnow`](hugo/indexnow/) | Submits only new and changed pages to IndexNow (Bing and others) after each deploy, ignoring sidebar churn. |
 | [`hugo/social-post`](hugo/social-post/) | Shares new Hugo blog posts to Bluesky and LinkedIn from a GitHub Action, using text approved at writing time. |
 
 ## Using an example
