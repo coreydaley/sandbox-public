@@ -1,0 +1,90 @@
+# Posts the approved social text for a blog post once it's live.
+#
+# A post opts in with a `[promo]` table in its front matter (bluesky,
+# linkedin, linkedin_comment); that text was approved when it was written and
+# is posted verbatim. Runs after every successful deploy, so it covers both
+# scheduled posts (a morning job that starts the deploy) and posts pushed live.
+# social_post.py skips drafts, future posts, posts older than 3 days
+# and anything already in .github/social-posted.json, and checks the URL
+# returns 200 first. The ledger is committed back with GITHUB_TOKEN, which
+# doesn't trigger another deploy.
+#
+# Repo settings (Settings → Secrets and variables → Actions):
+#   secrets:   BLUESKY_APP_PASSWORD, LINKEDIN_ACCESS_TOKEN
+#   variables: SITE_URL, DEFAULT_UTC_OFFSET (optional), BLUESKY_HANDLE, LINKEDIN_PERSON_URN, LINKEDIN_TOKEN_EXPIRES (YYYY-MM-DD)
+# A channel whose credentials are missing is skipped. linkedin_auth.py
+# renews the LinkedIn token (every 60 days) and sets the LinkedIn values.
+
+name: Post to social
+
+on:
+  workflow_run:
+    workflows: ["Deploy site"] # the `name:` of your deploy workflow
+    types: [completed]
+  # Backstop in case a deploy started with GITHUB_TOKEN doesn't fire
+  # workflow_run; set it after your scheduled deploy. The ledger makes a second
+  # run a no-op.
+  schedule:
+    - cron: "45 13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be posted, post nothing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: social-post
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  post:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+
+      - name: Warn if the LinkedIn token is about to expire
+        env:
+          EXPIRES: ${{ vars.LINKEDIN_TOKEN_EXPIRES }}
+        run: |
+          [ -n "$EXPIRES" ] || exit 0
+          days=$(( ( $(date -d "$EXPIRES" +%s) - $(date +%s) ) / 86400 ))
+          if [ "$days" -lt 0 ]; then
+            echo "::error::LinkedIn token expired on $EXPIRES. Run linkedin_auth.py."
+          elif [ "$days" -lt 7 ]; then
+            echo "::warning::LinkedIn token expires in $days days ($EXPIRES). Run linkedin_auth.py."
+          fi
+
+      - name: Post
+        env:
+          SITE_URL: ${{ vars.SITE_URL }}
+          DEFAULT_UTC_OFFSET: ${{ vars.DEFAULT_UTC_OFFSET }}
+          BLUESKY_HANDLE: ${{ vars.BLUESKY_HANDLE }}
+          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+          LINKEDIN_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
+          LINKEDIN_PERSON_URN: ${{ vars.LINKEDIN_PERSON_URN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 scripts/social_post.py --dry-run
+          else
+            python3 scripts/social_post.py
+          fi
+
+      - name: Commit the ledger
+        if: always() && inputs.dry_run != true
+        run: |
+          git add .github/social-posted.json 2>/dev/null || exit 0
+          git diff --cached --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(social): record posted promos"
+          git pull --rebase origin main
+          git push origin HEAD:main
