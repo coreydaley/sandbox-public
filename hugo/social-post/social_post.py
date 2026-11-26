@@ -10,10 +10,14 @@ The text in it is the approved, final text; this script posts it verbatim.
     https://example.com/posts/2026/11/slug/\"\"\"
     linkedin = \"\"\"Hook line.
 
-    Body. Link in the first comment.
+    Body, no links.
 
     #Tag #Tag\"\"\"
-    linkedin_comment = "What's at the link: https://example.com/posts/2026/11/slug/"
+
+Both posts carry a link card built from the page's og:title, og:description
+and og:image. On LinkedIn the card is the post's link (an article post), so the
+text itself has no URL and there's no first comment: LinkedIn's self-serve API
+can post but not comment.
 
 A post is due when it is not a draft, its date has passed, it was dated within
 the last MAX_AGE_DAYS days, and its URL returns 200. Each channel is posted at
@@ -107,8 +111,10 @@ def validate(promo: dict, url: str) -> list[str]:
         if len(li) > LINKEDIN_LIMIT:
             errors.append(f"linkedin text is {len(li)} characters (limit {LINKEDIN_LIMIT})")
         if "http://" in li or "https://" in li:
-            errors.append("linkedin body must not contain a link; put it in linkedin_comment")
-    unknown = set(promo) - {"bluesky", "linkedin", "linkedin_comment"}
+            errors.append("linkedin text must not contain a link; the post's link is attached as a card")
+        if "first comment" in li.lower():
+            errors.append("linkedin text mentions a first comment, but none is posted")
+    unknown = set(promo) - {"bluesky", "linkedin"}
     if unknown:
         errors.append(f"unknown promo keys: {sorted(unknown)}")
     return errors
@@ -259,12 +265,30 @@ def little_text(text: str) -> str:
     return "".join(out)
 
 
-def post_linkedin(text: str, comment: str | None, token: str, person: str) -> str:
+def linkedin_thumbnail(image_url: str, headers: dict, person: str) -> str:
+    _, _, img = request("GET", image_url, raw=True)
+    _, _, init = request("POST", "https://api.linkedin.com/rest/images?action=initializeUpload",
+                         headers=headers, body={"initializeUploadRequest": {"owner": person}})
+    upload = init["value"]
+    request("PUT", upload["uploadUrl"], headers={"Authorization": headers["Authorization"]}, body=img)
+    return upload["image"]
+
+
+def post_linkedin(text: str, url: str, token: str, person: str) -> str:
     headers = {
         "Authorization": f"Bearer {token}",
         "LinkedIn-Version": LINKEDIN_VERSION,
         "X-Restli-Protocol-Version": "2.0.0",
     }
+    meta = page_meta(url)
+    article = {"source": url, "title": meta.get("og:title") or url}
+    if meta.get("og:description"):
+        article["description"] = meta["og:description"]
+    if meta.get("og:image"):
+        try:
+            article["thumbnail"] = linkedin_thumbnail(urllib.parse.urljoin(url, meta["og:image"]), headers, person)
+        except (RuntimeError, KeyError, OSError) as e:
+            print(f"  linkedin: no thumbnail ({e})")
     body = {
         "author": person,
         "commentary": little_text(text),
@@ -272,17 +296,12 @@ def post_linkedin(text: str, comment: str | None, token: str, person: str) -> st
         "distribution": {"feedDistribution": "MAIN_FEED", "targetEntities": [], "thirdPartyDistributionChannels": []},
         "lifecycleState": "PUBLISHED",
         "isReshareDisabledByAuthor": False,
+        "content": {"article": article},
     }
     _, resp_headers, _ = request("POST", "https://api.linkedin.com/rest/posts", headers=headers, body=body)
     urn = resp_headers.get("x-restli-id") or resp_headers.get("X-RestLi-Id")
     if not urn:
         raise RuntimeError("LinkedIn created the post but returned no id")
-    if comment:
-        try:
-            request("POST", f"https://api.linkedin.com/rest/socialActions/{urllib.parse.quote(urn)}/comments",
-                    headers=headers, body={"actor": person, "object": urn, "message": {"text": comment}})
-        except RuntimeError as e:
-            print(f"::warning::LinkedIn post {urn} is up but the first comment failed: {e}")
     return f"https://www.linkedin.com/feed/update/{urn}/"
 
 
@@ -317,8 +336,6 @@ def run(content: Path, ledger_path: Path, dry_run: bool, now: dt.datetime, env=o
         if dry_run:
             for c in todo:
                 print(f"--- {c} ---\n{promo[c]}")
-            if "linkedin" in todo and promo.get("linkedin_comment"):
-                print(f"--- linkedin first comment ---\n{promo['linkedin_comment']}")
             continue
         if not live(url):
             print(f"::error::{url} is not returning 200; nothing posted")
@@ -335,8 +352,8 @@ def run(content: Path, ledger_path: Path, dry_run: bool, now: dt.datetime, env=o
                     if not (env.get("LINKEDIN_ACCESS_TOKEN") and env.get("LINKEDIN_PERSON_URN")):
                         print("::notice::LinkedIn credentials not set; skipping")
                         continue
-                    done["linkedin"] = linkedin(promo["linkedin"], promo.get("linkedin_comment"),
-                                                env["LINKEDIN_ACCESS_TOKEN"], env["LINKEDIN_PERSON_URN"])
+                    done["linkedin"] = linkedin(promo["linkedin"], url, env["LINKEDIN_ACCESS_TOKEN"],
+                                                env["LINKEDIN_PERSON_URN"])
                 print(f"  {channel}: {done[channel]}")
                 save_ledger(ledger_path, {k: v for k, v in ledger.items() if v})
             except RuntimeError as e:

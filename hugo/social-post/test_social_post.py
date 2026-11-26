@@ -27,7 +27,6 @@ linkedin = """Hook.
 Body (with #Tags) and a_b.
 
 #Git #macOS"""
-linkedin_comment = "Read it: {URL}"
 '''
 
 
@@ -89,6 +88,12 @@ class Validate(unittest.TestCase):
     def test_linkedin_body_link_rejected(self):
         self.assertTrue(sp.validate({"linkedin": f"see {URL}"}, URL))
 
+    def test_first_comment_mention_rejected(self):
+        self.assertTrue(sp.validate({"linkedin": "Link in the first comment."}, URL))
+
+    def test_linkedin_comment_key_rejected(self):
+        self.assertTrue(sp.validate({"linkedin_comment": f"Read it: {URL}"}, URL))
+
     def test_unknown_key_rejected(self):
         self.assertTrue(sp.validate({"blusky": "typo"}, URL))
 
@@ -121,6 +126,35 @@ class LittleText(unittest.TestCase):
         self.assertEqual(sp.little_text("C#"), "C\\#")
 
 
+class PostLinkedIn(unittest.TestCase):
+    def test_article_card_with_uploaded_thumbnail(self):
+        calls = []
+
+        def fake(method, url, *, headers=None, body=None, raw=False):
+            calls.append((method, url, body))
+            if url == URL:
+                return 200, {}, b'<meta property="og:title" content="T"><meta property="og:description" content="D"><meta property="og:image" content="/c.png">'
+            if url.endswith("/c.png"):
+                return 200, {}, b"png"
+            if "initializeUpload" in url:
+                return 200, {}, {"value": {"uploadUrl": "https://up.example/x", "image": "urn:li:image:1"}}
+            if url == "https://up.example/x":
+                return 201, {}, {}
+            return 201, {"x-restli-id": "urn:li:share:9"}, {}
+
+        orig, sp.request = sp.request, fake
+        try:
+            link = sp.post_linkedin("Hook #Tag", URL, "t", "urn:li:person:x")
+        finally:
+            sp.request = orig
+        self.assertEqual(link, "https://www.linkedin.com/feed/update/urn:li:share:9/")
+        post = [b for m, u, b in calls if u.endswith("/rest/posts")][0]
+        self.assertEqual(post["content"]["article"],
+                         {"source": URL, "title": "T", "description": "D", "thumbnail": "urn:li:image:1"})
+        self.assertEqual(post["commentary"], "Hook {hashtag|\\#|Tag}")
+        self.assertFalse(any("socialActions" in u for _, u, _ in calls))
+
+
 class Run(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -139,8 +173,8 @@ class Run(unittest.TestCase):
         self.calls.append(("bluesky", text))
         return "https://bsky.app/profile/h/post/1"
 
-    def linkedin(self, text, comment, token, person):
-        self.calls.append(("linkedin", text, comment))
+    def linkedin(self, text, url, token, person):
+        self.calls.append(("linkedin", text))
         return "https://www.linkedin.com/feed/update/urn:li:share:1/"
 
     def go(self, **kw):
@@ -151,7 +185,6 @@ class Run(unittest.TestCase):
     def test_posts_both_and_records(self):
         self.assertEqual(self.go(), 0)
         self.assertEqual([c[0] for c in self.calls], ["bluesky", "linkedin"])
-        self.assertEqual(self.calls[1][2], f"Read it: {URL}")
         self.assertEqual(set(json.loads(self.ledger.read_text())[URL]), {"bluesky", "linkedin"})
 
     def test_second_run_posts_nothing(self):

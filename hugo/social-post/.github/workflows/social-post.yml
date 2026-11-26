@@ -1,7 +1,7 @@
 # Posts the approved social text for a blog post once it's live.
 #
 # A post opts in with a `[promo]` table in its front matter (bluesky,
-# linkedin, linkedin_comment); that text was approved when it was written and
+# linkedin); that text was approved when it was written and
 # is posted verbatim. Runs after every successful deploy, so it covers both
 # scheduled posts (a morning job that starts the deploy) and posts pushed live.
 # social_post.py skips drafts, future posts, posts older than 3 days
@@ -21,9 +21,11 @@ on:
   workflow_run:
     workflows: ["Deploy site"] # the `name:` of your deploy workflow
     types: [completed]
-  # Backstop in case a deploy started with GITHUB_TOKEN doesn't fire
-  # workflow_run; set it after your scheduled deploy. The ledger makes a second
-  # run a no-op.
+  # A deploy started with GITHUB_TOKEN (e.g. by a scheduled publish job)
+  # doesn't fire workflow_run, so have that job also run this workflow:
+  #   gh workflow run social-post.yml -f dry_run=false
+  # This cron is a backstop; set it after your scheduled deploy. GitHub's
+  # scheduled runs can start hours late. The ledger makes a second run a no-op.
   schedule:
     - cron: "45 13 * * *"
   workflow_dispatch:
@@ -38,7 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: write # commit the ledger
 
 jobs:
   post:
